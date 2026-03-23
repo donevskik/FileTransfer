@@ -1,48 +1,47 @@
 ﻿using System.Security.Cryptography;
-using static System.Runtime.InteropServices.JavaScript.JSType;
 
 internal class Program
 {
     private static async Task Main(string[] args)
     {
-        string sourcePath = "C:\\Users\\kdo\\Downloads\\100MB.bin";
+        string sourcePath = "C:\\Users\\kdo\\Downloads\\1GB.bin";
         string destinationPath = "testing.bin";
 
-        //using FileStream sourceStream = File.OpenRead(sourcePath);
         using FileStream sourceStream = new(sourcePath, FileMode.Open, FileAccess.Read);
 
         using FileStream destinationStream = new(destinationPath, FileMode.Create, FileAccess.ReadWrite);
         
-        int partSize = 1024;
+        int partSize = 1024000;
         int bytesRead = 0;
-        int totalBytes = 0;
         int position = 0;
+        byte[] part = new byte[partSize];
 
-        do
+        while ((bytesRead = await sourceStream.ReadAsync(part.AsMemory(0, partSize))) > 0)
         {
-            var part = new byte[partSize];
-            bytesRead = await sourceStream.ReadAsync(part.AsMemory(0, partSize));
-            totalBytes += bytesRead;
-
             byte[] hashedPart = MD5.HashData(part);
 
-            bool success = await SendData(part, hashedPart, position, bytesRead, destinationStream);
+            bool success = await SendData(part, hashedPart, position, bytesRead, partSize, destinationStream);
 
-            Console.WriteLine($"Position = {position}, MD5 = {BitConverter.ToString(hashedPart)}");
+            Console.WriteLine($"Position = {position}, Skip = {bytesRead}, MD5Hash = {BitConverter.ToString(hashedPart)}");
 
             position += bytesRead;
 
-        } while (bytesRead > 0);
+            part = new byte[partSize];
+
+        }
+
+        if (VerifyFile(sourceStream, destinationStream))
+        {
+            Console.WriteLine("File transferred successfully");
+        }
+        else
+        {
+            Console.WriteLine("File transfer failed");
+        }
+
     }
-    
-    /// <summary>
-    /// sends the data
-    /// </summary>
-    /// <param name="part"></param>
-    /// <param name="hashed"></param>
-    /// <param name="position"></param>
-    /// <returns>true if success, false otherwise</returns>
-    private static async Task<bool> SendData(byte[] part, byte[] hashed, int position, int bytesRead, FileStream destinationStream)
+
+    private static async Task<bool> SendData(byte[] part, byte[] hashed, int position, int bytesRead, int partSize, FileStream destinationStream)
     {
         int maxRetries = 3;
         int retryCount = 0;
@@ -54,9 +53,9 @@ internal class Program
             await destinationStream.WriteAsync(part, 0, bytesRead);
             await destinationStream.FlushAsync();
 
-            byte[] verifyPart = new byte[bytesRead];
+            byte[] verifyPart = new byte[partSize];
             destinationStream.Seek(position, SeekOrigin.Begin);
-            await destinationStream.ReadExactlyAsync(verifyPart.AsMemory(0, bytesRead));
+            await destinationStream.ReadAsync(verifyPart.AsMemory(0, partSize));
 
             byte[] destinationHash = MD5.HashData(verifyPart);
 
@@ -86,5 +85,15 @@ internal class Program
         }
 
         return array1.SequenceEqual(array2);
+    }
+
+    private static bool VerifyFile(FileStream sourceFile, FileStream destinationFile)
+    {
+        SHA256 sha256 = SHA256.Create();
+
+        byte[] source = sha256.ComputeHash(sourceFile);
+        byte[] destination = sha256.ComputeHash(destinationFile);
+
+        return AreByteArraysEqual(source, destination);
     }
 }
