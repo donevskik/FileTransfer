@@ -10,25 +10,44 @@ internal class Program
         using FileStream sourceStream = new(sourcePath, FileMode.Open, FileAccess.Read);
 
         using FileStream destinationStream = new(destinationPath, FileMode.Create, FileAccess.ReadWrite);
-        
-        int partSize = 1024000;
+
+        int maxParallelism = 4;
+        int partSize = 1000000;
         int bytesRead = 0;
         int position = 0;
         byte[] part = new byte[partSize];
 
-        while ((bytesRead = await sourceStream.ReadAsync(part.AsMemory(0, partSize))) > 0)
+        int totalParts = (int)Math.Ceiling((double)sourceStream.Length / partSize);
+
+        SemaphoreSlim semaphore = new(maxParallelism);
+
+        List<Task> tasks = [];
+
+        for (int i = 0; i < totalParts; i++)
         {
-            byte[] hashedPart = MD5.HashData(part);
+            tasks.Add(Task.Run(async () =>
+            {
+                await semaphore.WaitAsync();
 
-            bool success = await SendData(part, hashedPart, position, bytesRead, partSize, destinationStream);
+                try
+                {
+                    bytesRead = await sourceStream.ReadAsync(part.AsMemory(0, partSize));
 
-            Console.WriteLine($"Position = {position}, Skip = {bytesRead}, MD5Hash = {BitConverter.ToString(hashedPart)}");
+                    byte[] hashedPart = MD5.HashData(part);
 
-            position += bytesRead;
+                    bool success = await SendData(part, hashedPart, position, bytesRead, partSize, destinationStream);
 
-            part = new byte[partSize];
+                    Console.WriteLine($"Position = {position}, Skip = {bytesRead}, MD5Hash = {BitConverter.ToString(hashedPart)}");
 
+                    position += bytesRead;
+
+                    part = new byte[partSize];
+                }
+                finally { semaphore.Release(); }
+            }));
         }
+
+        await Task.WhenAll(tasks);
 
         if (VerifyFile(sourceStream, destinationStream))
         {
@@ -45,17 +64,27 @@ internal class Program
     {
         int maxRetries = 3;
         int retryCount = 0;
+
+        object writeLock = new object();
         while (retryCount < 3)
         {
             retryCount++;
 
-            destinationStream.Seek(position, SeekOrigin.Begin);
-            await destinationStream.WriteAsync(part, 0, bytesRead);
-            await destinationStream.FlushAsync();
+            lock (writeLock)
+            {
+                destinationStream.Seek(position, SeekOrigin.Begin);
+                destinationStream.Write(part, 0, bytesRead);
+                destinationStream.Flush();
+            }
+
 
             byte[] verifyPart = new byte[partSize];
-            destinationStream.Seek(position, SeekOrigin.Begin);
-            await destinationStream.ReadAsync(verifyPart.AsMemory(0, partSize));
+
+            lock (writeLock)
+            {
+                destinationStream.Seek(position, SeekOrigin.Begin);
+                destinationStream.Read(verifyPart, 0, partSize);
+            }
 
             byte[] destinationHash = MD5.HashData(verifyPart);
 
